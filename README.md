@@ -90,4 +90,4 @@ Register-ScheduledTask -TaskName "BookingBot" -Action $action -Trigger $trigger 
 
 © 2026 Ordalinnn. Все права защищены. Код опубликован для ознакомления. Использование, копирование и изменение возможны только с разрешения автора (см. [LICENSE](LICENSE)).
 
-Хотите такого бота для своего бизнеса? Пишите в Telegram: [@ordalinn](https://t.me/ordalinn)
+Хотите такого бота для своего бизнеса? Смотрите [портфолио](https://ordalinnn.github.io) и пишите в Telegram: [@ordalinn](https://t.me/ordalinn)
