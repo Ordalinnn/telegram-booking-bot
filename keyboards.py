@@ -6,7 +6,7 @@ Inline-кнопки — кнопки прямо под сообщением; п�
 from aiogram.types import InlineKeyboardButton, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import SERVICES
+from config import SERVICES, money
 
 BTN_BOOK = "📅 Записаться"
 BTN_MY = "📋 Мои записи"
@@ -35,7 +35,7 @@ def phone_kb() -> ReplyKeyboardMarkup:
 def services_kb():
     builder = InlineKeyboardBuilder()
     for key, (name, price) in SERVICES.items():
-        builder.button(text=f"{name} — {price} ₽", callback_data=f"service:{key}")
+        builder.button(text=f"{name} — {money(price)}", callback_data=f"service:{key}")
     builder.button(text="✖ Отмена", callback_data="abort")
     builder.adjust(1)  # по одной кнопке в ряд
     return builder.as_markup()

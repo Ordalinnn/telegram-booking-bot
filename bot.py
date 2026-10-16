@@ -20,7 +20,7 @@ import db
 import keyboards as kb
 from config import (
     ADMIN_ID, BOT_TOKEN, BUSINESS_NAME, CLOSE_HOUR, CONTACTS, DAYS_AHEAD,
-    LATE_REMIND_HOURS, OPEN_HOUR, REMIND_HOURS, SERVICES, WORK_DAYS,
+    LATE_REMIND_HOURS, OPEN_HOUR, REMIND_HOURS, SERVICES, WORK_DAYS, money,
 )
 
 dp = Dispatcher()
@@ -223,7 +223,7 @@ async def show_dates(callback: CallbackQuery, state: FSMContext):
     name, price = SERVICES[data["service"]]
     await state.set_state(Booking.date)
     await callback.message.edit_text(
-        f"Услуга: <b>{name}</b> — {price} ₽\n\nВыберите день:",
+        f"Услуга: <b>{name}</b> — {money(price)}\n\nВыберите день:",
         reply_markup=kb.dates_kb([(day, format_date(day)) for day in dates]),
     )
     await callback.answer()
