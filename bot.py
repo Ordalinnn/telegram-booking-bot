@@ -2,8 +2,11 @@
 import asyncio
 import logging
 import re
+import sys
 from datetime import date, datetime, timedelta
 from html import escape
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -398,8 +401,18 @@ async def reminder_loop(bot: Bot) -> None:
 
 # ---------- Запуск ----------
 
+def setup_logging() -> None:
+    """Журнал пишется в bot.log рядом с ботом (и в консоль, если она есть)."""
+    handlers: list[logging.Handler] = [
+        RotatingFileHandler(Path(__file__).with_name("bot.log"), maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    ]
+    if sys.stderr is not None:  # при фоновом запуске через pythonw консоли нет
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", handlers=handlers)
+
+
 async def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging()
     db.init_db()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     await bot.set_my_commands([
@@ -408,7 +421,7 @@ async def main():
     ])
     # Напоминания работают параллельно с приёмом сообщений
     reminders = asyncio.create_task(reminder_loop(bot))
-    logging.info("Бот запущен. Остановить: Ctrl+C")
+    logging.info("Бот запущен")
     try:
         await dp.start_polling(bot)
     finally:

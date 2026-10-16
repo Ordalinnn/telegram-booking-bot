@@ -42,6 +42,31 @@ python -m venv .venv
 2. Вставьте ID в `.env` после `ADMIN_ID=`.
 3. Перезапустите бота (`Ctrl+C`, затем снова команда из шага 3).
 
+## Автозапуск на Windows (бесплатно)
+
+Чтобы бот сам запускался в фоне при входе в Windows, создайте задачу в Планировщике (PowerShell, в папке проекта):
+```powershell
+$dir = (Get-Location).Path
+$action = New-ScheduledTaskAction -Execute "$dir\.venv\Scripts\pythonw.exe" -Argument "bot.py" -WorkingDirectory $dir
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "BookingBot" -Action $action -Trigger $trigger -Settings $settings
+```
+
+Управление:
+| Что сделать | Команда |
+|---|---|
+| Остановить бота | `Stop-ScheduledTask BookingBot` |
+| Запустить бота | `Start-ScheduledTask BookingBot` |
+| Убрать автозапуск | `Unregister-ScheduledTask BookingBot` |
+| Посмотреть журнал | `Get-Content bot.log -Tail 30` |
+
+После изменения кода перезапустите бота: остановите и снова запустите задачу.
+
+Не запускайте бота вручную (`python bot.py`), пока работает задача: две копии с одним токеном мешают друг другу.
+
+Бот работает, пока компьютер включён и не спит. Чтобы бот был доступен круглосуточно, нужен сервер (VPS).
+
 ## Как переделать под клиента
 
 Всё основное лежит в `config.py`: название, контакты, услуги с ценами, рабочие дни и часы, время напоминаний.
