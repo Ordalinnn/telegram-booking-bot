@@ -6,64 +6,80 @@ Inline-кнопки — кнопки прямо под сообщением; п�
 from aiogram.types import InlineKeyboardButton, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import SERVICES, money
-
-BTN_BOOK = "📅 Записаться"
-BTN_MY = "📋 Мои записи"
-BTN_CONTACTS = "📞 Контакты"
+from config import LANGUAGES, LEVELS, MASTERS, SERVICES, money, service_price
+from texts import t
 
 
-def main_menu() -> ReplyKeyboardMarkup:
+def lang_kb():
+    builder = InlineKeyboardBuilder()
+    for code, label in LANGUAGES.items():
+        builder.button(text=label, callback_data=f"lang:{code}")
+    return builder.as_markup()
+
+
+def main_menu(lang: str) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_BOOK)],
-            [KeyboardButton(text=BTN_MY), KeyboardButton(text=BTN_CONTACTS)],
+            [KeyboardButton(text=t(lang, "btn_book"))],
+            [KeyboardButton(text=t(lang, "btn_my")), KeyboardButton(text=t(lang, "btn_contacts"))],
+            [KeyboardButton(text=t(lang, "btn_lang"))],
         ],
         resize_keyboard=True,
     )
 
 
-def phone_kb() -> ReplyKeyboardMarkup:
+def phone_kb(lang: str) -> ReplyKeyboardMarkup:
     # request_contact=True — Telegram сам отправит номер пользователя по нажатию
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Отправить мой номер", request_contact=True)]],
+        keyboard=[[KeyboardButton(text=t(lang, "btn_send_phone"), request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def services_kb():
+def services_kb(lang: str):
     builder = InlineKeyboardBuilder()
-    for key, (name, price) in SERVICES.items():
-        builder.button(text=f"{name} — {money(price)}", callback_data=f"service:{key}")
-    builder.button(text="✖ Отмена", callback_data="abort")
+    for key, service in SERVICES.items():
+        cheapest = min(service["price"].values())
+        builder.button(text=f"{service[lang]} — {t(lang, 'from_price', price=money(cheapest))}", callback_data=f"service:{key}")
+    builder.button(text=t(lang, "btn_abort"), callback_data="abort")
     builder.adjust(1)  # по одной кнопке в ряд
     return builder.as_markup()
 
 
-def dates_kb(dates: list[tuple[str, str]]):
-    """dates — список пар (дата 2026-10-17, подпись «Пт 17.10»)."""
+def masters_kb(lang: str, service: str):
+    builder = InlineKeyboardBuilder()
+    for key, master in MASTERS.items():
+        level = LEVELS[master["level"]][lang]
+        builder.button(text=f"{master['name']} · {level} — {money(service_price(service, key))}", callback_data=f"master:{key}")
+    builder.adjust(1)
+    builder.row(_back(lang, "back:service"), _abort(lang))
+    return builder.as_markup()
+
+
+def dates_kb(lang: str, dates: list[tuple[str, str]]):
+    """dates — список пар (дата 2026-10-17, подпись «Сб 17.10»)."""
     builder = InlineKeyboardBuilder()
     for day, label in dates:
         builder.button(text=label, callback_data=f"date:{day}")
     builder.adjust(3)
-    builder.row(_back("back:service"), _abort())
+    builder.row(_back(lang, "back:master"), _abort(lang))
     return builder.as_markup()
 
 
-def times_kb(times: list[str]):
+def times_kb(lang: str, times: list[str]):
     builder = InlineKeyboardBuilder()
     for slot in times:
         builder.button(text=slot, callback_data=f"time:{slot}")
     builder.adjust(4)
-    builder.row(_back("back:date"), _abort())
+    builder.row(_back(lang, "back:date"), _abort(lang))
     return builder.as_markup()
 
 
-def confirm_kb():
+def confirm_kb(lang: str):
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Подтвердить", callback_data="confirm")
-    builder.button(text="✖ Отмена", callback_data="abort")
+    builder.button(text=t(lang, "btn_confirm"), callback_data="confirm")
+    builder.button(text=t(lang, "btn_abort"), callback_data="abort")
     return builder.as_markup()
 
 
@@ -76,15 +92,15 @@ def my_bookings_kb(bookings: list[tuple[int, str]]):
     return builder.as_markup()
 
 
-def reminder_kb(booking_id: int):
+def reminder_kb(lang: str, booking_id: int):
     builder = InlineKeyboardBuilder()
-    builder.button(text="❌ Не смогу прийти — отменить", callback_data=f"cancel:{booking_id}")
+    builder.button(text=t(lang, "btn_reminder_cancel"), callback_data=f"cancel:{booking_id}")
     return builder.as_markup()
 
 
-def _back(callback_data: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text="◀ Назад", callback_data=callback_data)
+def _back(lang: str, callback_data: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=t(lang, "btn_back"), callback_data=callback_data)
 
 
-def _abort() -> InlineKeyboardButton:
-    return InlineKeyboardButton(text="✖ Отмена", callback_data="abort")
+def _abort(lang: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=t(lang, "btn_abort"), callback_data="abort")

@@ -19,19 +19,20 @@ from aiogram.types import BotCommand, CallbackQuery, Message
 import db
 import keyboards as kb
 from config import (
-    ADMIN_ID, BOT_TOKEN, BUSINESS_NAME, CLOSE_HOUR, CONTACTS, DAYS_AHEAD,
-    LATE_REMIND_HOURS, OPEN_HOUR, REMIND_HOURS, SERVICES, WORK_DAYS, money,
+    ADMIN_ID, ADMIN_LANG, BOT_TOKEN, BUSINESS_NAME, CLOSE_HOUR, CONTACTS, DAYS_AHEAD, LANGUAGES,
+    LATE_REMIND_HOURS, LEVELS, MASTERS, OPEN_HOUR, REMIND_HOURS, SERVICES, WORK_DAYS, money, service_price,
 )
+from texts import WEEKDAYS, all_langs, t
 
 dp = Dispatcher()
 
-WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 PHONE_RE = re.compile(r"^\+?\d{10,15}$")
 
 
 class Booking(StatesGroup):
     """Шаги записи. Бот помнит, на каком шаге каждый пользователь (это называется FSM)."""
     service = State()
+    master = State()
     date = State()
     time = State()
     name = State()
@@ -41,15 +42,30 @@ class Booking(StatesGroup):
 
 # ---------- Вспомогательные функции ----------
 
-def format_date(day: str) -> str:
-    """2026-10-17 → «Сб 17.10»"""
+def lang_of(user_id: int) -> str:
+    return db.get_lang(user_id) or next(iter(LANGUAGES))
+
+
+def format_date(day: str, lang: str) -> str:
+    """2026-10-17 → «Сб 17.10» / «Сн 17.10»"""
     d = date.fromisoformat(day)
-    return f"{WEEKDAYS[d.weekday()]} {d:%d.%m}"
+    return f"{WEEKDAYS[lang][d.weekday()]} {d:%d.%m}"
 
 
-def free_times(day: str) -> list[str]:
-    """Свободное время на день. Сегодня прошедшие часы не предлагаем."""
-    taken = db.taken_times(day)
+def service_label(service: str, lang: str) -> str:
+    # В старых записях вместо ключа услуги хранится её название — показываем как есть
+    return SERVICES[service][lang] if service in SERVICES else service
+
+
+def master_label(master: str, lang: str) -> str:
+    if master not in MASTERS:
+        return master
+    return f"{MASTERS[master]['name']} ({LEVELS[MASTERS[master]['level']][lang]})"
+
+
+def free_times(master: str, day: str) -> list[str]:
+    """Свободное время мастера на день. Сегодня прошедшие часы не предлагаем."""
+    taken = db.taken_times(master, day)
     now = datetime.now()
     times = []
     for hour in range(OPEN_HOUR, CLOSE_HOUR):
@@ -62,32 +78,39 @@ def free_times(day: str) -> list[str]:
     return times
 
 
-def available_dates() -> list[str]:
-    """Ближайшие рабочие дни, в которых есть хотя бы одно свободное время."""
+def available_dates(master: str) -> list[str]:
+    """Ближайшие рабочие дни, в которых у мастера есть хотя бы одно свободное время."""
     result = []
     for offset in range(60):
         day = date.today() + timedelta(days=offset)
-        if day.weekday() in WORK_DAYS and free_times(day.isoformat()):
+        if day.weekday() in WORK_DAYS and free_times(master, day.isoformat()):
             result.append(day.isoformat())
             if len(result) == DAYS_AHEAD:
                 break
     return result
 
 
-def booking_text(service: str, day: str, time: str, name: str, phone: str) -> str:
+def booking_text(lang: str, service: str, master: str, day: str, time: str, name: str, phone: str) -> str:
     # escape() защищает от поломки разметки, если клиент введёт в имени символы < или >
+    service_line = escape(service_label(service, lang))
+    if service in SERVICES and master in MASTERS:
+        service_line += f" — {money(service_price(service, master))}"
     return (
-        f"💈 Услуга: <b>{escape(service)}</b>\n"
-        f"📅 Дата: <b>{format_date(day)}, {time}</b>\n"
-        f"👤 Имя: {escape(name)}\n"
-        f"📞 Телефон: {escape(phone)}"
+        f"{t(lang, 'l_service')}: <b>{service_line}</b>\n"
+        f"{t(lang, 'l_master')}: {escape(master_label(master, lang))}\n"
+        f"{t(lang, 'l_date')}: <b>{format_date(day, lang)}, {time}</b>\n"
+        f"{t(lang, 'l_name')}: {escape(name)}\n"
+        f"{t(lang, 'l_phone')}: {escape(phone)}"
     )
 
 
-def summary(data: dict) -> str:
+def row_text(lang: str, row) -> str:
+    return booking_text(lang, row["service"], row["master"], row["date"], row["time"], row["name"], row["phone"])
+
+
+def summary(lang: str, data: dict) -> str:
     """Текст записи из данных, которые клиент ввёл по шагам."""
-    service_name = SERVICES[data["service"]][0]
-    return booking_text(service_name, data["date"], data["time"], data["name"], data["phone"])
+    return booking_text(lang, data["service"], data["master"], data["date"], data["time"], data["name"], data["phone"])
 
 
 def reminder_time(day: str, time: str) -> str | None:
@@ -114,16 +137,40 @@ async def notify_admin(bot: Bot, text: str) -> None:
         logging.exception("Не удалось отправить уведомление администратору")
 
 
-# ---------- Команды и главное меню ----------
+async def show_welcome(message: Message, lang: str) -> None:
+    await message.answer(t(lang, "welcome", business=BUSINESS_NAME), reply_markup=kb.main_menu(lang))
+
+
+# ---------- Язык, команды и главное меню ----------
 # Порядок важен: обработчики проверяются сверху вниз, срабатывает первый подходящий.
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        f"Здравствуйте! Это бот записи в {BUSINESS_NAME}.\n\nВыберите действие в меню ниже 👇",
-        reply_markup=kb.main_menu(),
-    )
+    lang = db.get_lang(message.from_user.id)
+    if lang is None:
+        await message.answer(t("ru", "choose_lang"), reply_markup=kb.lang_kb())
+        return
+    await show_welcome(message, lang)
+
+
+@dp.message(F.text.in_(all_langs("btn_lang")))
+async def ask_lang(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(t("ru", "choose_lang"), reply_markup=kb.lang_kb())
+
+
+@dp.callback_query(F.data.startswith("lang:"))
+async def choose_lang(callback: CallbackQuery, state: FSMContext):
+    lang = callback.data.split(":", 1)[1]
+    if lang not in LANGUAGES:
+        await callback.answer()
+        return
+    await state.clear()
+    db.set_lang(callback.from_user.id, lang)
+    await callback.message.edit_text(t(lang, "lang_set"))
+    await callback.answer()
+    await show_welcome(callback.message, lang)
 
 
 @dp.message(Command("myid"))
@@ -140,65 +187,66 @@ async def cmd_bookings(message: Message):
     if not rows:
         await message.answer("Предстоящих записей нет.")
         return
-    blocks = [
-        f"#{row['id']}\n" + booking_text(row["service"], row["date"], row["time"], row["name"], row["phone"])
-        for row in rows
-    ]
+    blocks = [f"#{row['id']}\n" + row_text(ADMIN_LANG, row) for row in rows]
     await message.answer("📋 Предстоящие записи:\n\n" + "\n\n".join(blocks))
 
 
-@dp.message(F.text == kb.BTN_CONTACTS)
+@dp.message(F.text.in_(all_langs("btn_contacts")))
 async def show_contacts(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(CONTACTS, reply_markup=kb.main_menu())
+    lang = lang_of(message.from_user.id)
+    await message.answer(CONTACTS[lang], reply_markup=kb.main_menu(lang))
 
 
-@dp.message(F.text == kb.BTN_MY)
+@dp.message(F.text.in_(all_langs("btn_my")))
 async def my_bookings(message: Message, state: FSMContext):
     await state.clear()
+    lang = lang_of(message.from_user.id)
     rows = db.user_bookings(message.from_user.id)
     if not rows:
-        await message.answer("У вас нет предстоящих записей.", reply_markup=kb.main_menu())
+        await message.answer(t(lang, "no_bookings"), reply_markup=kb.main_menu(lang))
         return
-    lines = [f"• {format_date(row['date'])}, {row['time']} — {escape(row['service'])}" for row in rows]
-    buttons = [(row["id"], f"❌ Отменить {format_date(row['date'])}, {row['time']}") for row in rows]
-    await message.answer(
-        "Ваши записи:\n\n" + "\n".join(lines),
-        reply_markup=kb.my_bookings_kb(buttons),
-    )
+    lines = [
+        f"• {format_date(row['date'], lang)}, {row['time']} — {escape(service_label(row['service'], lang))}, "
+        f"{escape(master_label(row['master'], lang))}"
+        for row in rows
+    ]
+    buttons = [
+        (row["id"], t(lang, "btn_cancel_booking", when=f"{format_date(row['date'], lang)}, {row['time']}"))
+        for row in rows
+    ]
+    await message.answer(t(lang, "your_bookings") + "\n\n" + "\n".join(lines), reply_markup=kb.my_bookings_kb(buttons))
 
 
 @dp.callback_query(F.data.startswith("cancel:"))
 async def cancel_booking(callback: CallbackQuery):
+    lang = lang_of(callback.from_user.id)
     booking_id = int(callback.data.split(":", 1)[1])
     row = db.cancel_booking(booking_id, callback.from_user.id)
     if row is None:
-        await callback.answer("Запись не найдена или уже отменена.", show_alert=True)
+        await callback.answer(t(lang, "not_found"), show_alert=True)
         return
-    when = f"{format_date(row['date'])}, {row['time']}"
-    await callback.message.edit_text(f"Запись на <b>{when}</b> отменена.")
+    await callback.message.edit_text(t(lang, "cancelled", when=f"{format_date(row['date'], lang)}, {row['time']}"))
     await callback.answer()
-    await notify_admin(
-        callback.bot,
-        f"❌ Клиент отменил запись #{row['id']}\n\n"
-        + booking_text(row["service"], row["date"], row["time"], row["name"], row["phone"]),
-    )
+    await notify_admin(callback.bot, f"❌ Клиент отменил запись #{row['id']}\n\n" + row_text(ADMIN_LANG, row))
 
 
 # ---------- Запись: шаг за шагом ----------
 
-@dp.message(F.text == kb.BTN_BOOK)
+@dp.message(F.text.in_(all_langs("btn_book")))
 @dp.message(Command("book"))
 async def start_booking(message: Message, state: FSMContext):
     await state.clear()
+    lang = lang_of(message.from_user.id)
     await state.set_state(Booking.service)
-    await message.answer("Выберите услугу:", reply_markup=kb.services_kb())
+    await message.answer(t(lang, "choose_service"), reply_markup=kb.services_kb(lang))
 
 
 @dp.callback_query(F.data == "abort")
 async def abort_booking(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("Запись отменена. Чтобы начать заново, нажмите «📅 Записаться».")
+    lang = lang_of(callback.from_user.id)
+    await callback.message.edit_text(t(lang, "aborted", btn_book=t(lang, "btn_book")))
     await callback.answer()
 
 
@@ -209,45 +257,77 @@ async def choose_service(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     await state.update_data(service=key)
-    await show_dates(callback, state)
+    await show_masters(callback, state)
 
 
-async def show_dates(callback: CallbackQuery, state: FSMContext):
-    dates = available_dates()
-    if not dates:
-        await state.clear()
-        await callback.message.edit_text("К сожалению, на ближайшие дни свободного времени нет. Позвоните нам 🙏")
-        await callback.answer()
-        return
+async def show_masters(callback: CallbackQuery, state: FSMContext):
+    lang = lang_of(callback.from_user.id)
     data = await state.get_data()
-    name, price = SERVICES[data["service"]]
-    await state.set_state(Booking.date)
+    await state.set_state(Booking.master)
     await callback.message.edit_text(
-        f"Услуга: <b>{name}</b> — {money(price)}\n\nВыберите день:",
-        reply_markup=kb.dates_kb([(day, format_date(day)) for day in dates]),
+        t(lang, "choose_master", service=SERVICES[data["service"]][lang]),
+        reply_markup=kb.masters_kb(lang, data["service"]),
     )
     await callback.answer()
 
 
-@dp.callback_query(Booking.date, F.data == "back:service")
+@dp.callback_query(Booking.master, F.data == "back:service")
 async def back_to_services(callback: CallbackQuery, state: FSMContext):
+    lang = lang_of(callback.from_user.id)
     await state.set_state(Booking.service)
-    await callback.message.edit_text("Выберите услугу:", reply_markup=kb.services_kb())
+    await callback.message.edit_text(t(lang, "choose_service"), reply_markup=kb.services_kb(lang))
     await callback.answer()
+
+
+@dp.callback_query(Booking.master, F.data.startswith("master:"))
+async def choose_master(callback: CallbackQuery, state: FSMContext):
+    key = callback.data.split(":", 1)[1]
+    if key not in MASTERS:
+        await callback.answer()
+        return
+    if not available_dates(key):
+        await callback.answer(t(lang_of(callback.from_user.id), "no_dates"), show_alert=True)
+        return
+    await state.update_data(master=key)
+    await show_dates(callback, state)
+
+
+async def show_dates(callback: CallbackQuery, state: FSMContext):
+    lang = lang_of(callback.from_user.id)
+    data = await state.get_data()
+    dates = available_dates(data["master"])
+    await state.set_state(Booking.date)
+    await callback.message.edit_text(
+        t(
+            lang, "choose_day",
+            service=SERVICES[data["service"]][lang],
+            master=master_label(data["master"], lang),
+            price=money(service_price(data["service"], data["master"])),
+        ),
+        reply_markup=kb.dates_kb(lang, [(day, format_date(day, lang)) for day in dates]),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(Booking.date, F.data == "back:master")
+async def back_to_masters(callback: CallbackQuery, state: FSMContext):
+    await show_masters(callback, state)
 
 
 @dp.callback_query(Booking.date, F.data.startswith("date:"))
 async def choose_date(callback: CallbackQuery, state: FSMContext):
+    lang = lang_of(callback.from_user.id)
+    data = await state.get_data()
     day = callback.data.split(":", 1)[1]
-    times = free_times(day)
+    times = free_times(data["master"], day)
     if not times:
-        await callback.answer("На этот день всё занято, выберите другой.", show_alert=True)
+        await callback.answer(t(lang, "day_full"), show_alert=True)
         return
     await state.update_data(date=day)
     await state.set_state(Booking.time)
     await callback.message.edit_text(
-        f"<b>{format_date(day)}</b> — выберите время:",
-        reply_markup=kb.times_kb(times),
+        t(lang, "choose_time", day=format_date(day, lang)),
+        reply_markup=kb.times_kb(lang, times),
     )
     await callback.answer()
 
@@ -259,30 +339,29 @@ async def back_to_dates(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(Booking.time, F.data.startswith("time:"))
 async def choose_time(callback: CallbackQuery, state: FSMContext):
+    lang = lang_of(callback.from_user.id)
     slot = callback.data.split(":", 1)[1]
     data = await state.get_data()
-    if slot not in free_times(data["date"]):
-        await callback.answer("Это время уже заняли, выберите другое.", show_alert=True)
+    if slot not in free_times(data["master"], data["date"]):
+        await callback.answer(t(lang, "time_taken"), show_alert=True)
         return
     await state.update_data(time=slot)
     await state.set_state(Booking.name)
-    await callback.message.edit_text(f"Вы выбрали: <b>{format_date(data['date'])}, {slot}</b>")
-    await callback.message.answer("Как вас зовут?")
+    await callback.message.edit_text(t(lang, "you_chose", day=format_date(data["date"], lang), time=slot))
+    await callback.message.answer(t(lang, "ask_name"))
     await callback.answer()
 
 
 @dp.message(Booking.name, F.text)
 async def enter_name(message: Message, state: FSMContext):
+    lang = lang_of(message.from_user.id)
     name = message.text.strip()
     if not 2 <= len(name) <= 50:
-        await message.answer("Пожалуйста, введите имя (от 2 до 50 символов).")
+        await message.answer(t(lang, "bad_name"))
         return
     await state.update_data(name=name)
     await state.set_state(Booking.phone)
-    await message.answer(
-        "Отправьте номер телефона кнопкой ниже или напишите его вручную:",
-        reply_markup=kb.phone_kb(),
-    )
+    await message.answer(t(lang, "ask_phone"), reply_markup=kb.phone_kb(lang))
 
 
 @dp.message(Booking.phone, F.contact)
@@ -294,73 +373,73 @@ async def enter_phone_contact(message: Message, state: FSMContext):
 async def enter_phone_text(message: Message, state: FSMContext):
     phone = re.sub(r"[\s\-()]", "", message.text)  # убираем пробелы, дефисы и скобки
     if not PHONE_RE.match(phone):
-        await message.answer("Не похоже на номер телефона. Пример: +79001234567")
+        await message.answer(t(lang_of(message.from_user.id), "bad_phone"))
         return
     await save_phone(message, state, phone)
 
 
 async def save_phone(message: Message, state: FSMContext, phone: str):
+    lang = lang_of(message.from_user.id)
     await state.update_data(phone=phone)
     await state.set_state(Booking.confirm)
     data = await state.get_data()
-    await message.answer("Почти готово!", reply_markup=kb.main_menu())
-    await message.answer(summary(data) + "\n\nВсё верно?", reply_markup=kb.confirm_kb())
+    await message.answer(t(lang, "almost"), reply_markup=kb.main_menu(lang))
+    await message.answer(summary(lang, data) + "\n\n" + t(lang, "confirm_q"), reply_markup=kb.confirm_kb(lang))
 
 
 @dp.callback_query(Booking.confirm, F.data == "confirm")
 async def confirm_booking(callback: CallbackQuery, state: FSMContext):
+    lang = lang_of(callback.from_user.id)
     data = await state.get_data()
     await state.clear()
     booking_id = None
     # Повторная проверка: пока клиент вводил имя, время могли занять или оно уже прошло
-    if data["time"] in free_times(data["date"]):
+    if data["time"] in free_times(data["master"], data["date"]):
         booking_id = db.add_booking(
-            callback.from_user.id, data["name"], data["phone"],
-            SERVICES[data["service"]][0], data["date"], data["time"],
-            reminder_time(data["date"], data["time"]),
+            callback.from_user.id, data["name"], data["phone"], data["service"], data["master"],
+            data["date"], data["time"], reminder_time(data["date"], data["time"]),
         )
     if booking_id is None:
-        await callback.message.edit_text(
-            "😔 Пока вы оформляли запись, это время стало недоступно. "
-            "Нажмите «📅 Записаться» и выберите другое."
-        )
+        await callback.message.edit_text(t(lang, "slot_lost", btn_book=t(lang, "btn_book")))
         await callback.answer()
         return
-    await callback.message.edit_text(
-        f"✅ Вы записаны!\n\n{summary(data)}\n\n"
-        "Ждём вас! Мы пришлём напоминание перед визитом. "
-        "Отменить запись можно в разделе «📋 Мои записи»."
-    )
+    await callback.message.edit_text(t(lang, "booked", summary=summary(lang, data), btn_my=t(lang, "btn_my")))
     await callback.answer()
-    await notify_admin(callback.bot, f"🆕 Новая запись #{booking_id}\n\n{summary(data)}")
+    await notify_admin(callback.bot, f"🆕 Новая запись #{booking_id}\n\n{summary(ADMIN_LANG, data)}")
 
 
 # ---------- Если пользователь сделал что-то неожиданное ----------
 
 @dp.message(Booking.name)
 async def name_not_text(message: Message):
-    await message.answer("Напишите, пожалуйста, имя текстом.")
+    await message.answer(t(lang_of(message.from_user.id), "name_text"))
 
 
 @dp.message(Booking.phone)
 async def phone_not_text(message: Message):
-    await message.answer("Отправьте номер кнопкой «📱 Отправить мой номер» или напишите его.")
+    lang = lang_of(message.from_user.id)
+    await message.answer(t(lang, "phone_text", btn=t(lang, "btn_send_phone")))
 
 
-@dp.message(StateFilter(Booking.service, Booking.date, Booking.time, Booking.confirm))
+@dp.message(StateFilter(Booking.service, Booking.master, Booking.date, Booking.time, Booking.confirm))
 async def use_buttons(message: Message):
-    await message.answer("Пожалуйста, выберите вариант кнопками в сообщении выше 👆")
+    await message.answer(t(lang_of(message.from_user.id), "use_buttons"))
 
 
 @dp.message()
 async def unknown_message(message: Message):
-    await message.answer("Не понял вас 🙂 Воспользуйтесь меню ниже.", reply_markup=kb.main_menu())
+    lang = db.get_lang(message.from_user.id)
+    if lang is None:
+        await message.answer(t("ru", "choose_lang"), reply_markup=kb.lang_kb())
+        return
+    await message.answer(t(lang, "unknown"), reply_markup=kb.main_menu(lang))
 
 
 @dp.callback_query()
 async def outdated_button(callback: CallbackQuery):
     # Нажатие на кнопку из старого сообщения, когда запись уже завершена или начата заново
-    await callback.answer("Эта кнопка устарела. Нажмите «📅 Записаться», чтобы начать заново.", show_alert=True)
+    lang = lang_of(callback.from_user.id)
+    await callback.answer(t(lang, "outdated", btn_book=t(lang, "btn_book")), show_alert=True)
 
 
 # ---------- Напоминания ----------
@@ -368,20 +447,23 @@ async def outdated_button(callback: CallbackQuery):
 async def send_due_reminders(bot: Bot) -> None:
     now = datetime.now().isoformat(sep=" ", timespec="seconds")
     for row in db.due_reminders(now):
+        lang = lang_of(row["user_id"])
         visit_day = date.fromisoformat(row["date"])
         if visit_day == date.today():
-            when = "сегодня"
+            when = t(lang, "today")
         elif visit_day == date.today() + timedelta(days=1):
-            when = "завтра"
+            when = t(lang, "tomorrow")
         else:
-            when = format_date(row["date"])
+            when = format_date(row["date"], lang)
         try:
             await bot.send_message(
                 row["user_id"],
-                f"⏰ Напоминаем: вы записаны в {BUSINESS_NAME} <b>{when} в {row['time']}</b>.\n"
-                f"Услуга: {escape(row['service'])}\n\n"
-                "Если планы изменились, отмените запись кнопкой ниже — так время освободится для других.",
-                reply_markup=kb.reminder_kb(row["id"]),
+                t(
+                    lang, "reminder", business=BUSINESS_NAME, when=when, time=row["time"],
+                    service=escape(service_label(row["service"], lang)),
+                    master=escape(master_label(row["master"], lang)),
+                ),
+                reply_markup=kb.reminder_kb(lang, row["id"]),
             )
         except Exception:
             # Например, клиент заблокировал бота. Повторять не будем, иначе ошибка будет каждую минуту
@@ -413,11 +495,11 @@ def setup_logging() -> None:
 
 async def main():
     setup_logging()
-    db.init_db()
+    db.init_db(default_master=next(iter(MASTERS)))
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     await bot.set_my_commands([
-        BotCommand(command="start", description="Главное меню"),
-        BotCommand(command="book", description="Записаться"),
+        BotCommand(command="start", description="Бастау / Главное меню"),
+        BotCommand(command="book", description="Жазылу / Записаться"),
     ])
     # Напоминания работают параллельно с приёмом сообщений
     reminders = asyncio.create_task(reminder_loop(bot))

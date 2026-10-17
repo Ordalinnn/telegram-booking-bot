@@ -6,6 +6,24 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).with_name("bookings.db")
 
+# UNIQUE (master, date, time) не даёт двум клиентам записаться к одному мастеру на одно и то же время
+BOOKINGS_SCHEMA = """
+    CREATE TABLE bookings (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    INTEGER NOT NULL,
+        name       TEXT NOT NULL,
+        phone      TEXT NOT NULL,
+        service    TEXT NOT NULL,
+        master     TEXT NOT NULL,
+        date       TEXT NOT NULL,
+        time       TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        remind_at  TEXT,
+        reminded   INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (master, date, time)
+    )
+"""
+
 
 @contextmanager
 def connect():
@@ -19,54 +37,72 @@ def connect():
         conn.close()
 
 
-def init_db() -> None:
+def init_db(default_master: str) -> None:
+    """Создаёт таблицы, а базу от старой версии бота переводит на новый формат.
+
+    default_master — к какому мастеру отнести записи, сделанные до появления выбора мастера.
+    """
     with connect() as conn:
-        # UNIQUE (date, time) не даёт двум клиентам записаться на одно и то же время
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS bookings (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id    INTEGER NOT NULL,
-                name       TEXT NOT NULL,
-                phone      TEXT NOT NULL,
-                service    TEXT NOT NULL,
-                date       TEXT NOT NULL,
-                time       TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                remind_at  TEXT,
-                reminded   INTEGER NOT NULL DEFAULT 0,
-                UNIQUE (date, time)
-            )
-            """
-        )
-        # Миграция: если база создана старой версией бота, добавляем новые колонки
+        conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, lang TEXT NOT NULL)")
+        exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bookings'").fetchone()
+        if not exists:
+            conn.execute(BOOKINGS_SCHEMA)
+            return
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(bookings)")}
         if "remind_at" not in columns:
             conn.execute("ALTER TABLE bookings ADD COLUMN remind_at TEXT")
         if "reminded" not in columns:
             conn.execute("ALTER TABLE bookings ADD COLUMN reminded INTEGER NOT NULL DEFAULT 0")
+        if "master" not in columns:
+            # Ограничение UNIQUE в SQLite не изменить, поэтому пересоздаём таблицу и переносим записи
+            conn.execute("ALTER TABLE bookings RENAME TO bookings_old")
+            conn.execute(BOOKINGS_SCHEMA)
+            conn.execute(
+                "INSERT INTO bookings (id, user_id, name, phone, service, master, date, time, created_at, remind_at, reminded)"
+                " SELECT id, user_id, name, phone, service, ?, date, time, created_at, remind_at, reminded FROM bookings_old",
+                (default_master,),
+            )
+            conn.execute("DROP TABLE bookings_old")
 
 
-def taken_times(day: str) -> set[str]:
-    """Занятое время на указанный день (день в формате 2026-10-17)."""
+# ---------- Язык пользователя ----------
+
+def get_lang(user_id: int) -> str | None:
     with connect() as conn:
-        rows = conn.execute("SELECT time FROM bookings WHERE date = ?", (day,)).fetchall()
+        row = conn.execute("SELECT lang FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return row["lang"] if row else None
+
+
+def set_lang(user_id: int, lang: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO users (user_id, lang) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET lang = excluded.lang",
+            (user_id, lang),
+        )
+
+
+# ---------- Записи ----------
+
+def taken_times(master: str, day: str) -> set[str]:
+    """Занятое время мастера на указанный день (день в формате 2026-10-17)."""
+    with connect() as conn:
+        rows = conn.execute("SELECT time FROM bookings WHERE master = ? AND date = ?", (master, day)).fetchall()
     return {row["time"] for row in rows}
 
 
 def add_booking(
-    user_id: int, name: str, phone: str, service: str, day: str, time: str, remind_at: str | None
+    user_id: int, name: str, phone: str, service: str, master: str, day: str, time: str, remind_at: str | None
 ) -> int | None:
-    """Создаёт запись и возвращает её номер. None — если это время уже кто-то занял.
+    """Создаёт запись и возвращает её номер. None — если это время у мастера уже кто-то занял.
 
     remind_at — когда отправить напоминание (2026-10-17 10:00:00), None — не напоминать.
     """
     try:
         with connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO bookings (user_id, name, phone, service, date, time, remind_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (user_id, name, phone, service, day, time, remind_at),
+                "INSERT INTO bookings (user_id, name, phone, service, master, date, time, remind_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (user_id, name, phone, service, master, day, time, remind_at),
             )
             return cursor.lastrowid
     except sqlite3.IntegrityError:
@@ -86,7 +122,7 @@ def upcoming_bookings() -> list[sqlite3.Row]:
     """Все предстоящие записи — для администратора."""
     with connect() as conn:
         return conn.execute(
-            "SELECT * FROM bookings WHERE date >= ? ORDER BY date, time",
+            "SELECT * FROM bookings WHERE date >= ? ORDER BY date, time, master",
             (date.today().isoformat(),),
         ).fetchall()
 
